@@ -1,0 +1,29 @@
+## 1.0.0
+
+Initial stable release of **`file_drop`** — a unified, zero-dependency Flutter file selector and drag-and-drop plugin across **Android**, **iOS**, **Linux**, **macOS**, **Windows**, and **Web / WebAssembly** (`dart2wasm`).
+
+### Zero-Dependency 6-Platform Architecture
+* Eliminates all external hosted Pub, CocoaPods/SPM, CMake, and Gradle/Maven dependencies (`dependencies:` contains **only** Flutter SDK packages: `flutter` and `flutter_web_plugins`), resolving version-solving conflicts between `file_selector` (`cross_file ^0.3.0` + 7 federated packages) and `desktop_drop` (`cross_file ^0.4.0` + 5 federated packages, `mime`, `web`; `0.8.x`: `universal_platform`, `dbus`, `ffi`).
+* **Android (`Kotlin` / Storage Access Framework & `View.OnDragListener`, minSdk 24, AGP 8.x & 9.x Built-in Kotlin compatible)**: Zero-`androidx` SAF pickers (`ACTION_OPEN_DOCUMENT`, `ACTION_CREATE_DOCUMENT`, `ACTION_OPEN_DOCUMENT_TREE`), 256 KB chunked `ContentResolver` `readContentUri` streaming, `DocumentsContract` tree listing, and multi-window `View.OnDragListener` + `Activity.requestDragAndDropPermissions`.
+* **iOS (`Swift` / `UIKit` & `UniformTypeIdentifiers`, iOS 14.0+)**: Dual Swift Package Manager (`Package.swift`) and CocoaPods (`file_drop.podspec`) layout with `PrivacyInfo.xcprivacy`, `UIDocumentPickerViewController` open/export/directory pickers, `NSFileCoordinator` staging, security-scoped bookmarks, and iOS/iPadOS `UIDropInteractionDelegate` drag-and-drop.
+* **Linux (`C++14` / `GTK3` & XDG Desktop Portal, `-Wall -Werror` clean)**: Asynchronous `GtkFileChooserNative` dialogs automatically backed by `org.freedesktop.portal.FileChooser` without Dart `dbus` dependencies, plus `gtk_drag_dest_set` (`text/uri-list` and plain text) drag-and-drop across X11 and Wayland.
+* **macOS (`Swift` / `AppKit` & `UniformTypeIdentifiers`, macOS 11.0+)**: Dual Swift Package Manager (`Package.swift`) and CocoaPods (`file_drop.podspec`) layout with `PrivacyInfo.xcprivacy`, sheet/modal `NSOpenPanel` and `NSSavePanel` dialogs, `UTType` content filtering, `NSFilePromiseReceiver` promised files, and a resize-safe, non-intercepting `NSDraggingDestination` view.
+* **Windows (`C++17` / `Win32 COM` & `OLE`, `/W4 /WX` clean)**: Modal `IFileOpenDialog` and `IFileSaveDialog` COM dialogs attached to the root Flutter `HWND`, paired with a reference-counted `IDropTarget` + `IDropTargetHelper` OLE drag destination and per-monitor HiDPI coordinate scaling via `FlutterDesktopGetDpiForHWND`.
+* **Web & WebAssembly (`dart:js_interop` / `dart:js_interop_unsafe`, `dart2wasm` clean)**: Conditional-import architecture isolating `dart:io` from Web, featuring `<input type="file">`, File System Access API (`showSaveFilePicker`) with `<a download>` `Blob` fallback, `DataTransfer` + `webkitGetAsEntry` recursive directory drops, and 256 KB `Blob.slice` streaming.
+
+### 1:1 Drop-in Compatibility Barrels
+* `package:file_drop/file_drop.dart`: Unified API exporting all selector dialogs, cross-platform file/directory models, and drag-and-drop widgets.
+* `package:file_drop/file_selector.dart`: Drop-in replacement barrel for `file_selector` (`1.1.x`) and `cross_file` (`0.3.x` & `0.4.x`), exporting `XFile`, `XDirectory`, `XEntity`, `FileSystemXFile`, `FileSystemXDirectory`, `XTypeGroup`, and `FileSaveLocation`.
+* `package:file_drop/desktop_drop.dart`: Drop-in replacement barrel for `desktop_drop` across both `0.8.x` and `0.9.2`, exporting `DropTarget`, `DesktopDrop`, `DropItem`, `DropItemFile`, `DropItemDirectory`, `DropFileItem`, `DropDirectoryItem`, `DropStringItem`, `DropDoneDetails`, `DropEventDetails`, `DragDetails`, `DropDetails`, `DropOffer`, `DropItemPreview`, `DropItemKind`, and `DropOperation`.
+
+### Cross-Platform File & Directory Dialogs
+* File open dialogs: `openFile` and `openFiles` across all 6 platforms with `acceptedTypeGroups` (`XTypeGroup` extensions, MIME types, `webWildCards`, and Apple UTIs / `uniformTypeIdentifiers`), `initialDirectory`, and `confirmButtonText`.
+* Cross-platform byte saving & desktop save locations: `saveFile` (`Uint8List bytes`) across all 6 platforms, plus desktop `getSaveLocation` returning `FileSaveLocation` (`path` and `activeFilter`) and legacy `getSavePath`.
+* Directory pickers & temporary cache management: `openDirectory` returning `XDirectory` (`list()`, `exists()`), `getDirectoryPath`, `getDirectoryPaths`, and `clearTemporaryFiles` for cleaning up Android/iOS picker cache files and revoking tracked Web `blob:` URLs.
+
+
+### Cross-Platform Drag-and-Drop (`DropTarget` & `DesktopDrop`)
+* Multi-zone `DropTarget` widget supporting sibling, nested, and `Stack`-overlapping drop zones via `RenderBox` bounds and paint-order hit-testing (`HitTestBehavior`).
+* Supports both `desktop_drop 0.8.x` lifecycle callbacks (`onDragEntered`, `onDragUpdated`, `onDragExited`, `onDragDone`) and `desktop_drop 0.9.2` callbacks and predicates (`onEnter`, `onMove`, `onLeave`, `onDrop`, `acceptedKinds`, `onWillAccept`, `operation`) with ancestor fallback when an inner target declines an offer.
+* Normalizes native pointer positions into Flutter global and widget-local logical coordinates across all 6 platforms (`View.getLocationInWindow` + `displayMetrics.density` on Android, `UIWindow` points on iOS, logical GDK widget coordinates on Linux, `isFlipped = true` on macOS, `ScreenToClient` + DPI scaling on Windows, and `clientX`/`clientY` on Web).
+* Manages asynchronous drop session lifetimes (`releaseDropSession`) so Android `DragAndDropPermissions` and iOS security-scoped resources remain valid throughout `async` `onDragDone` / `onDrop` handlers, alongside Android SAF `requestDirectoryAccess` and Apple security-scoped bookmarks (`appleBookmark` / `extraAppleBookmark` with `DesktopDrop.instance.startAccessingSecurityScopedResource` and `stopAccessingSecurityScopedResource`).

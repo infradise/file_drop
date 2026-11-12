@@ -1,0 +1,19 @@
+name: file_drop_example
+description: Desktop testbed application demonstrating the zero-dependency file_drop plugin.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  file_drop:
+    path: ../
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:

@@ -1,0 +1,24 @@
+analyzer:
+  exclude:
+    - build/**
+    - windows/**
+    - macos/**
+    - linux/**
+    - web/**
+    - android/**
+    - ios/**
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    - always_declare_return_types
+    - annotate_overrides
+    - avoid_print
+    - prefer_const_constructors
+    - prefer_final_locals
+    - prefer_single_quotes
+    - use_key_in_widget_constructors
+    - use_super_parameters
