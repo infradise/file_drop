@@ -1,0 +1,402 @@
+name: Check Preflight
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Verification mode: strict (release-ready 160/160) or wip (for -wip feature branches)'
+        required: true
+        default: 'strict'
+        type: choice
+        options:
+          - strict
+          - wip
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Analyze & Test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Resolve package dependencies
+        run: flutter pub get
+
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Verify Dart formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Run strict static analysis (package)
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: Run strict static analysis (example)
+        working-directory: example
+        run: flutter analyze --fatal-infos --fatal-warnings
+
+      - name: Run workspace-wide Dart static analysis
+        run: dart analyze --fatal-infos --fatal-warnings .
+
+      - name: Run unit and widget tests (package)
+        run: flutter test
+
+      - name: Run widget tests (example)
+        working-directory: example
+        run: flutter test
+
+  build-desktop:
+    name: Build & Test Desktop (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-latest
+            platform: linux
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux GTK3 build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Configure Flutter desktop target
+        run: flutter config --enable-${{ matrix.platform }}-desktop
+
+      - name: Enable Swift Package Manager on macOS
+        if: matrix.platform == 'macos'
+        run: flutter config --enable-swift-package-manager
+
+      - name: Resolve package dependencies (${{ matrix.platform }})
+        if: matrix.platform != 'linux'
+        run: flutter pub get
+
+      - name: Run unit and widget tests (${{ matrix.platform }})
+        if: matrix.platform != 'linux'
+        run: flutter test
+
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Run example widget tests (${{ matrix.platform }})
+        if: matrix.platform != 'linux'
+        working-directory: example
+        run: flutter test
+
+      - name: Build example (${{ matrix.platform }} debug)
+        working-directory: example
+        run: flutter build ${{ matrix.platform }} --debug
+
+  build-web:
+    name: Build Web (Wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Build example (WebAssembly)
+        working-directory: example
+        run: flutter build web --wasm
+
+  build-mobile:
+    name: Build Mobile (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: android
+          - os: macos-latest
+            platform: ios
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17 for Android
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Enable Swift Package Manager on iOS
+        if: matrix.platform == 'ios'
+        run: flutter config --enable-swift-package-manager
+
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Build example (Android debug APK)
+        if: matrix.platform == 'android'
+        working-directory: example
+        run: flutter build apk --debug
+
+      - name: Build example (iOS Simulator debug)
+        if: matrix.platform == 'ios'
+        working-directory: example
+        run: flutter build ios --simulator --debug --no-codesign
+
+  pub-preflight:
+    name: Pub.dev Score & Publish Gate
+    runs-on: ubuntu-latest
+    env:
+      PREFLIGHT_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'strict' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Verify zero-dependency plugin purity & repository hygiene
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, sys
+          from pathlib import Path
+
+          pubspec = Path('pubspec.yaml').read_text(encoding='utf-8')
+
+          if re.search(r'^dependency_overrides\s*:', pubspec, flags=re.M):
+              print('ERROR: dependency_overrides is forbidden in pubspec.yaml.')
+              sys.exit(1)
+
+          def extract_dep_keys(section_name: str) -> set[str]:
+              m = re.search(rf'^{section_name}:\s*\n(.*?)(?=^\S|\Z)', pubspec, flags=re.M | re.S)
+              if not m:
+                  return set()
+              keys = set()
+              for line in m.group(1).splitlines():
+                  if not line.strip() or line.lstrip().startswith('#'):
+                      continue
+                  km = re.match(r'^  ([a-zA-Z0-9_]+)\s*:', line)
+                  if km:
+                      keys.add(km.group(1))
+                  elif not re.match(r'^    sdk:\s*flutter\s*$', line):
+                      print(f'ERROR: Non-Flutter-SDK dependency specification in {section_name}: {line}')
+                      sys.exit(1)
+              return keys
+
+          deps = extract_dep_keys('dependencies')
+          dev_deps = extract_dep_keys('dev_dependencies')
+
+          allowed_deps = {'flutter', 'flutter_web_plugins'}
+          allowed_dev_deps = {'flutter_test'}
+
+          if not deps.issubset(allowed_deps):
+              print(f'ERROR: Forbidden external dependencies found: {sorted(deps - allowed_deps)}')
+              sys.exit(1)
+          if not dev_deps.issubset(allowed_dev_deps):
+              print(f'ERROR: Forbidden external dev_dependencies found: {sorted(dev_deps - allowed_dev_deps)}')
+              sys.exit(1)
+
+          raw_matches = subprocess.run(
+              [
+                  'git', 'grep', '-n', '-I', '-E',
+                  r'(/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|[A-Za-z]:\\+Users\\+[A-Za-z0-9._-]+)',
+                  '--', '.', ':!.github/workflows/',
+              ],
+              capture_output=True, text=True
+          )
+          allow_users = {
+              'user', 'users', 'alice', 'bob', 'demo', 'example', 'test',
+              'runner', 'runneradmin', 'ubuntu', 'public', 'shared', 'default',
+          }
+          user_pat = re.compile(
+              r'(?:/Users/|/home/|[A-Za-z]:\\+Users\\+)([A-Za-z0-9._-]+)'
+          )
+          leaked_lines = []
+          for line in raw_matches.stdout.splitlines():
+              users = [m.group(1).lower() for m in user_pat.finditer(line)]
+              if any(u not in allow_users for u in users):
+                  leaked_lines.append(line)
+          if leaked_lines:
+              print('ERROR: Hardcoded personal path detected:\n' + '\n'.join(leaked_lines))
+              sys.exit(1)
+
+          print('Zero-dependency Flutter plugin purity and path hygiene verified.')
+          PY
+
+      - name: Activate pana
+        run: dart pub global activate pana
+
+      - name: Run pana & enforce 160/160 score and 6-platform tags gate
+        shell: bash
+        run: |
+          dart pub global run pana --json . > "${RUNNER_TEMP}/pana_report.json"
+          python3 - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+
+          mode = os.environ['PREFLIGHT_MODE']
+          report_path = Path(os.environ['RUNNER_TEMP']) / 'pana_report.json'
+          data = json.loads(report_path.read_text(encoding='utf-8'))
+
+          sections = data.get('report', {}).get('sections', [])
+          tags = set(data.get('tags', []))
+          granted_total = sum(s.get('grantedPoints', 0) for s in sections)
+          max_total = sum(s.get('maxPoints', 0) for s in sections)
+
+          REQUIRED_TAGS = [
+              'sdk:flutter',
+              'platform:android',
+              'platform:ios',
+              'platform:linux',
+              'platform:macos',
+              'platform:windows',
+              'platform:web',
+              'is:wasm-ready',
+              'is:swiftpm-plugin',
+          ]
+          missing_tags = [t for t in REQUIRED_TAGS if t not in tags]
+
+          summary_lines = [
+              f'### Pub.dev Preflight Scorecard (`mode: {mode}`)',
+              '',
+              '| Category | ID | Score | Status |',
+              '| :--- | :--- | :---: | :---: |',
+          ]
+          failures = []
+
+          for s in sections:
+              sid = s.get('id', '')
+              title = s.get('title', sid)
+              gp = s.get('grantedPoints', 0)
+              mp = s.get('maxPoints', 0)
+              status = s.get('status', '')
+              summary_lines.append(f'| {title} | `{sid}` | {gp} / {mp} | {status} |')
+
+              if gp < mp:
+                  if mode == 'wip' and sid == 'convention':
+                      continue
+                  failures.append(f"[{sid}] {title}: {gp}/{mp}\n{s.get('summary', '')}")
+
+          summary_lines.append(f'| **Total** | | **{granted_total} / {max_total}** | |')
+          summary_lines.append('')
+          summary_lines.append('**Detected Pub.dev Tags:** ' + ', '.join(f'`{t}`' for t in sorted(tags)))
+
+          step_summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if step_summary:
+              with open(step_summary, 'a', encoding='utf-8') as f:
+                  f.write('\n'.join(summary_lines) + '\n')
+
+          print('\n'.join(summary_lines))
+
+          if missing_tags:
+              print(f'\nERROR: Missing required 6-platform / Wasm / SPM tags: {missing_tags}')
+              sys.exit(1)
+
+          if mode == 'strict' and (granted_total < max_total or max_total == 0):
+              print('\nERROR: Strict mode requires full max points (zero deductions).')
+              for item in failures:
+                  print(item)
+              sys.exit(1)
+
+          if failures:
+              print(f'\nERROR: Preflight failed in {mode} mode:')
+              for item in failures:
+                  print(item)
+              sys.exit(1)
+          PY
+
+      - name: Verify version, CHANGELOG, git cleanliness & pub publish --dry-run
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "ERROR: Working tree is dirty before publish check:"
+            git status --short
+            exit 1
+          fi
+
+          VERSION=$(python3 -c "import re, pathlib; m = re.search(r'^version:\s*([^\s#]+)', pathlib.Path('pubspec.yaml').read_text(), re.M); print(m.group(1).strip('\"\'') if m else '')")
+          echo "Detected package version: ${VERSION} (mode: ${PREFLIGHT_MODE})"
+
+          if [ "${PREFLIGHT_MODE}" = "strict" ]; then
+            case "${VERSION}" in
+              *-wip*)
+                echo "ERROR: -wip version (${VERSION}) cannot pass strict release gate."
+                exit 1
+                ;;
+            esac
+
+            python3 - "${VERSION}" <<'PY'
+          import re, sys
+          from pathlib import Path
+          ver = sys.argv[1]
+          cl = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          if not re.search(rf'^##\s+\[?{re.escape(ver)}\]?\b', cl, flags=re.M):
+              print(f'ERROR: CHANGELOG.md does not contain a "## {ver}" release heading.')
+              sys.exit(1)
+          PY
+
+            DRY_OUT="${RUNNER_TEMP}/publish_dry_run.txt"
+            dart pub publish --dry-run | tee "${DRY_OUT}"
+          else
+            echo "WIP mode: inspecting archive file layout (warnings for -wip version allowed)..."
+            DRY_OUT="${RUNNER_TEMP}/publish_dry_run.txt"
+            dart pub publish --dry-run > "${DRY_OUT}" 2>&1 || true
+            cat "${DRY_OUT}"
+          fi
+
+          if grep -E '^├── (\.github|test|analysis_options\.yaml)\b' "${DRY_OUT}"; then
+            echo "ERROR: Root dev/CI files leaked into published archive!"
+            exit 1
+          fi
+          if grep -E '^│   ├── (android|ios|linux|macos|web|windows|test|analysis_options\.yaml)\b' "${DRY_OUT}"; then
+            echo "ERROR: Example native runner scaffolding leaked into published archive!"
+            exit 1
+          fi
