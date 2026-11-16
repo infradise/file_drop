@@ -47,3 +47,7 @@ Thumbs.db
 **/DerivedData/
 .swiftpm/
 **/.swiftpm/
+.ruby-lsp/
+**/.ruby-lsp/
+.kotlin/
+**/.kotlin/

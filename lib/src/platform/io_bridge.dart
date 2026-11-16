@@ -299,6 +299,59 @@ final class _ChannelContentUriFileBacking implements PlatformFileBacking {
     if (limit != null && limit <= offset) {
       return;
     }
+
+    // Prefer O(N) stateful native stream handle when supported by the host.
+    String? streamId;
+    try {
+      streamId = await _ioChannel.invokeMethod<String>(
+        'openContentStream',
+        <String, dynamic>{
+          'uri': _uri,
+          'start': offset,
+        },
+      );
+    } on MissingPluginException {
+      streamId = null;
+    }
+
+    if (streamId != null && streamId.isNotEmpty) {
+      try {
+        while (limit == null || offset < limit) {
+          final requestedLength = limit == null
+              ? chunkSize
+              : (offset + chunkSize < limit ? chunkSize : limit - offset);
+          if (requestedLength <= 0) {
+            break;
+          }
+          final bytes = await _ioChannel.invokeMethod<Uint8List>(
+            'readContentStreamChunk',
+            <String, dynamic>{
+              'streamId': streamId,
+              'length': requestedLength,
+            },
+          );
+          if (bytes == null || bytes.isEmpty) {
+            break;
+          }
+          yield bytes;
+          offset += bytes.length;
+          if (bytes.length < requestedLength) {
+            break;
+          }
+        }
+      } finally {
+        try {
+          await _ioChannel.invokeMethod<void>(
+            'closeContentStream',
+            <String, dynamic>{'streamId': streamId},
+          );
+        } on MissingPluginException {
+          // Ignore if host cleaned up stream on detach.
+        }
+      }
+      return;
+    }
+
     while (limit == null || offset < limit) {
       final nextEnd = limit == null
           ? offset + chunkSize
@@ -335,8 +388,19 @@ final class _ChannelContentUriFileBacking implements PlatformFileBacking {
 
   @override
   Future<void> saveTo(String targetPath) async {
-    final bytes = await readAsBytes();
-    await File(targetPath).writeAsBytes(bytes);
+    final outFile = File(targetPath);
+    if (!outFile.parent.existsSync()) {
+      outFile.parent.createSync(recursive: true);
+    }
+    final sink = outFile.openWrite();
+    try {
+      await for (final chunk in openRead()) {
+        sink.add(chunk);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
   }
 
   @override

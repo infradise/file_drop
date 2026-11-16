@@ -104,6 +104,7 @@ class FileDropPlugin :
   private val mainHandler = Handler(Looper.getMainLooper())
   private val requestLock = Any()
   private val activeDropSessions = ConcurrentHashMap<String, DragAndDropPermissions>()
+  private val activeContentStreams = ConcurrentHashMap<String, InputStream>()
 
   private var applicationContext: Context? = null
   private var channel: MethodChannel? = null
@@ -128,6 +129,7 @@ class FileDropPlugin :
     detachDragListener()
     cancelPendingRequest("DETACHED", "FlutterEngine detached while dialog was pending.")
     releaseAllDropSessions()
+    closeAllContentStreams()
     channel?.setMethodCallHandler(null)
     channel = null
     executor?.shutdown()
@@ -224,6 +226,9 @@ class FileDropPlugin :
         null,
       )
       "requestDirectoryAccess" -> launchRequestDirectoryAccess(call, safeResult)
+      "openContentStream" -> handleOpenContentStream(call, safeResult)
+      "readContentStreamChunk" -> handleReadContentStreamChunk(call, safeResult)
+      "closeContentStream" -> handleCloseContentStream(call, safeResult)
       "readContentUri" -> handleReadContentUri(call, safeResult)
       "statContentUri" -> handleStatContentUri(call, safeResult)
       "writeContentUri" -> handleWriteContentUri(call, safeResult)
@@ -417,7 +422,8 @@ class FileDropPlugin :
         runInBackground(request.result) {
           val batchDir = makeCacheSubdirectory(context, "picker", UUID.randomUUID().toString())
           val copied = copyContentUriToFile(context, uri, batchDir, 0, "picked_file")
-          request.result.success(copied?.absolutePath)
+            ?: throw java.io.IOException("Failed to copy selected content URI to local cache: $uri")
+          request.result.success(copied.absolutePath)
         }
       }
 
@@ -432,9 +438,8 @@ class FileDropPlugin :
           val paths = ArrayList<String>(uris.size)
           for ((index, uri) in uris.withIndex()) {
             val copied = copyContentUriToFile(context, uri, batchDir, index, "picked_file_$index")
-            if (copied != null) {
-              paths.add(copied.absolutePath)
-            }
+              ?: throw java.io.IOException("Failed to copy selected content URI to local cache: $uri")
+            paths.add(copied.absolutePath)
           }
           request.result.success(paths)
         }
@@ -515,6 +520,107 @@ class FileDropPlugin :
   }
 
   // MARK: - SAF Content URI Operations
+
+  private fun handleOpenContentStream(call: MethodCall, result: SingleShotResult) {
+    val context = applicationContext
+    val rawUri = call.argument<String>("uri")
+    if (context == null || rawUri.isNullOrEmpty()) {
+      result.error("INVALID_URI", "Missing content URI for openContentStream.", null)
+      return
+    }
+    val startOffset = ((call.argument<Number>("start"))?.toLong() ?: 0L).coerceAtLeast(0L)
+
+    runInBackground(result) {
+      val uri = Uri.parse(rawUri)
+      val stream = context.contentResolver.openInputStream(uri)
+        ?: throw IllegalStateException("Unable to open InputStream for $rawUri")
+      try {
+        var remainingSkip = startOffset
+        val skipScratch = ByteArray(minOf(STREAM_BUFFER_SIZE.toLong(), maxOf(remainingSkip, 1L)).toInt())
+        while (remainingSkip > 0L) {
+          val skipped = stream.skip(remainingSkip)
+          if (skipped > 0L) {
+            remainingSkip -= skipped
+            continue
+          }
+          val toRead = minOf(skipScratch.size.toLong(), remainingSkip).toInt()
+          val read = stream.read(skipScratch, 0, toRead)
+          if (read < 0) {
+            break
+          }
+          remainingSkip -= read.toLong()
+        }
+        val streamId = UUID.randomUUID().toString()
+        activeContentStreams[streamId] = stream
+        result.success(streamId)
+      } catch (e: Exception) {
+        try {
+          stream.close()
+        } catch (_: Exception) {
+        }
+        throw e
+      }
+    }
+  }
+
+  private fun handleReadContentStreamChunk(call: MethodCall, result: SingleShotResult) {
+    val streamId = call.argument<String>("streamId")
+    val requestedLength = ((call.argument<Number>("length"))?.toInt() ?: (256 * 1024)).coerceAtLeast(1)
+    if (streamId.isNullOrEmpty()) {
+      result.error("INVALID_STREAM", "Missing streamId for readContentStreamChunk.", null)
+      return
+    }
+    val stream = activeContentStreams[streamId]
+    if (stream == null) {
+      result.success(ByteArray(0))
+      return
+    }
+
+    runInBackground(result) {
+      synchronized(stream) {
+        val out = ByteArrayOutputStream(minOf(requestedLength, STREAM_BUFFER_SIZE))
+        val buffer = ByteArray(minOf(requestedLength, STREAM_BUFFER_SIZE))
+        var remaining = requestedLength
+        while (remaining > 0) {
+          val toRead = minOf(buffer.size, remaining)
+          val read = stream.read(buffer, 0, toRead)
+          if (read < 0) {
+            break
+          }
+          if (read > 0) {
+            out.write(buffer, 0, read)
+            remaining -= read
+          }
+        }
+        result.success(out.toByteArray())
+      }
+    }
+  }
+
+  private fun handleCloseContentStream(call: MethodCall, result: SingleShotResult) {
+    val streamId = call.argument<String>("streamId")
+    if (!streamId.isNullOrEmpty()) {
+      val stream = activeContentStreams.remove(streamId)
+      if (stream != null) {
+        try {
+          stream.close()
+        } catch (_: Exception) {
+        }
+      }
+    }
+    result.success(null)
+  }
+
+  private fun closeAllContentStreams() {
+    val entries = activeContentStreams.values.toList()
+    activeContentStreams.clear()
+    for (stream in entries) {
+      try {
+        stream.close()
+      } catch (_: Exception) {
+      }
+    }
+  }
 
   private fun handleReadContentUri(call: MethodCall, result: SingleShotResult) {
     val context = applicationContext

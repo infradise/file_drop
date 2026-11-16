@@ -1,6 +1,6 @@
 name: file_drop
 description: Zero-dependency file selector and drag-and-drop plugin for Flutter across Android, iOS, Linux, macOS, Windows, and Web. Replaces file_selector and desktop_drop.
-version: 1.0.0
+version: 1.0.1
 homepage: https://github.com/infradise/file_drop
 repository: https://github.com/infradise/file_drop
 issue_tracker: https://github.com/infradise/file_drop/issues

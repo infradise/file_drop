@@ -353,6 +353,41 @@ GdkDragAction SelectDragAction(GdkDragContext* context) {
   return GDK_ACTION_COPY;
 }
 
+FlValue* BuildHoverArgsForTarget(gint x, gint y, GdkAtom target) {
+  FlValue* args = MakeCoordsMap(x, y);
+  g_autofree gchar* atom_name = gdk_atom_name(target);
+  const bool is_uri_target =
+      (atom_name != nullptr) &&
+      (std::strcmp(atom_name, "text/uri-list") == 0);
+
+  FlValue* offer = fl_value_new_map();
+  FlValue* item_previews = fl_value_new_list();
+  FlValue* string_previews = fl_value_new_list();
+  if (is_uri_target) {
+    FlValue* file_preview = fl_value_new_map();
+    fl_value_set_string_take(file_preview, "isDirectory",
+                             fl_value_new_bool(FALSE));
+    fl_value_set_string_take(file_preview, "isPromised",
+                             fl_value_new_bool(FALSE));
+    fl_value_append_take(item_previews, file_preview);
+
+    FlValue* uri_str_preview = fl_value_new_map();
+    fl_value_set_string_take(uri_str_preview, "mimeType",
+                             fl_value_new_string("text/uri-list"));
+    fl_value_append_take(string_previews, uri_str_preview);
+  } else {
+    FlValue* text_preview = fl_value_new_map();
+    fl_value_set_string_take(text_preview, "mimeType",
+                             fl_value_new_string("text/plain"));
+    fl_value_append_take(string_previews, text_preview);
+  }
+  fl_value_set_string_take(offer, "items", item_previews);
+  fl_value_set_string_take(offer, "strings", string_previews);
+  fl_value_set_string_take(offer, "isComplete", fl_value_new_bool(FALSE));
+  fl_value_set_string_take(args, "offer", offer);
+  return args;
+}
+
 gboolean OnDragMotion(GtkWidget* widget, GdkDragContext* context, gint x,
                       gint y, guint time, gpointer user_data) {
   auto* self = FILE_DROP_PLUGIN(user_data);
@@ -370,7 +405,7 @@ gboolean OnDragMotion(GtkWidget* widget, GdkDragContext* context, gint x,
   self->drop_y = y;
   self->has_drop_coords = TRUE;
 
-  g_autoptr(FlValue) args = MakeCoordsMap(x, y);
+  g_autoptr(FlValue) args = BuildHoverArgsForTarget(x, y, target);
   if (!self->is_dragging) {
     self->is_dragging = TRUE;
     fl_method_channel_invoke_method(self->channel, "onDragEntered", args,
@@ -435,20 +470,68 @@ void OnDragDataReceived(GtkWidget* /*widget*/, GdkDragContext* context, gint x,
   }
 
   g_autoptr(FlValue) items = fl_value_new_list();
-  g_auto(GStrv) uris = g_uri_list_extract_uris(raw_text.c_str());
-  for (gchar** uri = uris; uri != nullptr && *uri != nullptr; ++uri) {
-    g_autofree gchar* hostname = nullptr;
-    g_autofree gchar* local_path =
-        g_filename_from_uri(*uri, &hostname, nullptr);
-    if (local_path == nullptr || local_path[0] == '\0') {
-      continue;
-    }
+  GdkAtom data_type = gtk_selection_data_get_data_type(selection_data);
+  g_autofree gchar* type_name = gdk_atom_name(data_type);
+  const bool is_uri_list =
+      (type_name != nullptr) &&
+      (std::strcmp(type_name, "text/uri-list") == 0);
 
-    const gboolean is_dir = g_file_test(local_path, G_FILE_TEST_IS_DIR);
-    FlValue* entry = fl_value_new_map();
-    fl_value_set_string_take(entry, "path", fl_value_new_string(local_path));
-    fl_value_set_string_take(entry, "isDirectory", fl_value_new_bool(is_dir));
-    fl_value_append_take(items, entry);
+  if (is_uri_list) {
+    g_auto(GStrv) uris = gtk_selection_data_get_uris(selection_data);
+    if (uris == nullptr) {
+      uris = g_uri_list_extract_uris(raw_text.c_str());
+    }
+    for (gchar** uri = uris; uri != nullptr && *uri != nullptr; ++uri) {
+      if ((*uri)[0] == '\0') {
+        continue;
+      }
+      if (g_str_has_prefix(*uri, "file:")) {
+        g_autofree gchar* hostname = nullptr;
+        g_autofree gchar* local_path =
+            g_filename_from_uri(*uri, &hostname, nullptr);
+        if (local_path != nullptr && local_path[0] != '\0') {
+          const gboolean is_dir = g_file_test(local_path, G_FILE_TEST_IS_DIR);
+          FlValue* entry = fl_value_new_map();
+          fl_value_set_string_take(entry, "path",
+                                   fl_value_new_string(local_path));
+          fl_value_set_string_take(entry, "isDirectory",
+                                   fl_value_new_bool(is_dir));
+          fl_value_append_take(items, entry);
+        }
+      } else {
+        FlValue* entry = fl_value_new_map();
+        fl_value_set_string_take(entry, "kind", fl_value_new_string("string"));
+        fl_value_set_string_take(entry, "mimeType",
+                                 fl_value_new_string("text/uri-list"));
+        fl_value_set_string_take(entry, "value", fl_value_new_string(*uri));
+        fl_value_append_take(items, entry);
+      }
+    }
+  }
+
+  if (fl_value_get_length(items) == 0) {
+    g_autofree gchar* decoded_text =
+        reinterpret_cast<gchar*>(gtk_selection_data_get_text(selection_data));
+    const char* text_ptr = nullptr;
+    if (decoded_text != nullptr && decoded_text[0] != '\0') {
+      text_ptr = decoded_text;
+    } else if (!raw_text.empty() &&
+               g_utf8_validate(raw_text.data(),
+                               static_cast<gssize>(raw_text.size()), nullptr)) {
+      text_ptr = raw_text.c_str();
+    }
+    if (text_ptr != nullptr) {
+      const bool looks_like_uri = g_str_has_prefix(text_ptr, "http://") ||
+                                  g_str_has_prefix(text_ptr, "https://") ||
+                                  g_str_has_prefix(text_ptr, "mailto:");
+      FlValue* entry = fl_value_new_map();
+      fl_value_set_string_take(entry, "kind", fl_value_new_string("string"));
+      fl_value_set_string_take(
+          entry, "mimeType",
+          fl_value_new_string(looks_like_uri ? "text/uri-list" : "text/plain"));
+      fl_value_set_string_take(entry, "value", fl_value_new_string(text_ptr));
+      fl_value_append_take(items, entry);
+    }
   }
 
   g_autoptr(FlValue) payload = MakeCoordsMap(effective_x, effective_y);
@@ -540,6 +623,7 @@ void file_drop_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
         static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE |
                                    GDK_ACTION_LINK));
     gtk_drag_dest_add_uri_targets(widget);
+    gtk_drag_dest_add_text_targets(widget);
     gtk_drag_dest_set_track_motion(widget, TRUE);
 
     g_signal_connect_object(widget, "drag-motion", G_CALLBACK(OnDragMotion),

@@ -303,10 +303,14 @@ class FileDropComTarget : public IDropTarget {
     if (effect == nullptr) {
       return E_POINTER;
     }
-    FORMATETC fmt = {static_cast<CLIPFORMAT>(CF_HDROP), nullptr,
-                     DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    has_hdrop_ =
-        (data_obj != nullptr && SUCCEEDED(data_obj->QueryGetData(&fmt)));
+    FORMATETC hdrop_fmt = {static_cast<CLIPFORMAT>(CF_HDROP), nullptr,
+                           DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    FORMATETC text_fmt = {static_cast<CLIPFORMAT>(CF_UNICODETEXT), nullptr,
+                          DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    has_hdrop_ = (data_obj != nullptr &&
+                  SUCCEEDED(data_obj->QueryGetData(&hdrop_fmt)));
+    has_unicode_text_ = (data_obj != nullptr &&
+                         SUCCEEDED(data_obj->QueryGetData(&text_fmt)));
     *effect = ChooseEffect(*effect);
 
     if (drag_helper_ && data_obj != nullptr && hwnd_ != nullptr) {
@@ -315,14 +319,12 @@ class FileDropComTarget : public IDropTarget {
           drag_helper_->DragEnter(hwnd_, data_obj, &screen_pt, *effect));
     }
 
-    if (has_hdrop_ && channel_ && hwnd_ != nullptr) {
+    if (HasSupportedDrag() && channel_ && hwnd_ != nullptr) {
       const auto coords = ToFlutterLogicalPoint(pt);
       channel_->InvokeMethod(
           "onDragEntered",
-          std::make_unique<EncodableValue>(EncodableMap{
-              {EncodableValue("x"), EncodableValue(coords.first)},
-              {EncodableValue("y"), EncodableValue(coords.second)},
-          }));
+          std::make_unique<EncodableValue>(
+              BuildHoverPayload(coords.first, coords.second)));
     }
     return S_OK;
   }
@@ -339,14 +341,12 @@ class FileDropComTarget : public IDropTarget {
       drag_helper_->DragOver(&screen_pt, *effect);
     }
 
-    if (has_hdrop_ && channel_ && hwnd_ != nullptr) {
+    if (HasSupportedDrag() && channel_ && hwnd_ != nullptr) {
       const auto coords = ToFlutterLogicalPoint(pt);
       channel_->InvokeMethod(
           "onDragUpdated",
-          std::make_unique<EncodableValue>(EncodableMap{
-              {EncodableValue("x"), EncodableValue(coords.first)},
-              {EncodableValue("y"), EncodableValue(coords.second)},
-          }));
+          std::make_unique<EncodableValue>(
+              BuildHoverPayload(coords.first, coords.second)));
     }
     return S_OK;
   }
@@ -356,11 +356,12 @@ class FileDropComTarget : public IDropTarget {
       drag_helper_->DragLeave();
       drag_helper_active_ = false;
     }
-    if (has_hdrop_ && channel_) {
+    if (HasSupportedDrag() && channel_) {
       channel_->InvokeMethod("onDragExited",
                              std::make_unique<EncodableValue>());
     }
     has_hdrop_ = false;
+    has_unicode_text_ = false;
     return S_OK;
   }
 
@@ -378,6 +379,7 @@ class FileDropComTarget : public IDropTarget {
     }
 
     EncodableList dropped_items;
+    std::string raw_text;
     FORMATETC fmt = {static_cast<CLIPFORMAT>(CF_HDROP), nullptr,
                      DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
     STGMEDIUM medium{};
@@ -412,18 +414,58 @@ class FileDropComTarget : public IDropTarget {
       ::ReleaseStgMedium(&medium);
     }
 
+    if (dropped_items.empty() && data_obj != nullptr) {
+      FORMATETC text_fmt = {static_cast<CLIPFORMAT>(CF_UNICODETEXT), nullptr,
+                            DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+      STGMEDIUM text_medium{};
+      if (SUCCEEDED(data_obj->GetData(&text_fmt, &text_medium))) {
+        if (text_medium.tymed == TYMED_HGLOBAL &&
+            text_medium.hGlobal != nullptr) {
+          const SIZE_T byte_size = ::GlobalSize(text_medium.hGlobal);
+          const auto* wide_chars =
+              static_cast<const wchar_t*>(::GlobalLock(text_medium.hGlobal));
+          if (wide_chars != nullptr && byte_size >= sizeof(wchar_t)) {
+            const size_t max_chars = byte_size / sizeof(wchar_t);
+            size_t len = 0U;
+            while (len < max_chars && wide_chars[len] != L'\0') {
+              ++len;
+            }
+            if (len > 0U) {
+              std::wstring wide_str(wide_chars, len);
+              raw_text = WideToUtf8(wide_str);
+              const bool is_uri = (raw_text.rfind("http://", 0) == 0U) ||
+                                  (raw_text.rfind("https://", 0) == 0U) ||
+                                  (raw_text.rfind("mailto:", 0) == 0U);
+              dropped_items.push_back(EncodableValue(EncodableMap{
+                  {EncodableValue("kind"), EncodableValue("string")},
+                  {EncodableValue("mimeType"),
+                   EncodableValue(is_uri ? "text/uri-list" : "text/plain")},
+                  {EncodableValue("value"), EncodableValue(raw_text)},
+              }));
+            }
+            ::GlobalUnlock(text_medium.hGlobal);
+          }
+        }
+        ::ReleaseStgMedium(&text_medium);
+      }
+    }
+
     if (channel_ && hwnd_ != nullptr && !dropped_items.empty()) {
       const auto coords = ToFlutterLogicalPoint(pt);
-      channel_->InvokeMethod(
-          "onDragDone",
-          std::make_unique<EncodableValue>(EncodableMap{
-              {EncodableValue("x"), EncodableValue(coords.first)},
-              {EncodableValue("y"), EncodableValue(coords.second)},
-              {EncodableValue("items"), EncodableValue(dropped_items)},
-          }));
+      EncodableMap payload{
+          {EncodableValue("x"), EncodableValue(coords.first)},
+          {EncodableValue("y"), EncodableValue(coords.second)},
+          {EncodableValue("items"), EncodableValue(dropped_items)},
+      };
+      if (!raw_text.empty()) {
+        payload.emplace(EncodableValue("rawText"), EncodableValue(raw_text));
+      }
+      channel_->InvokeMethod("onDragDone",
+                             std::make_unique<EncodableValue>(payload));
     }
 
     has_hdrop_ = false;
+    has_unicode_text_ = false;
     return S_OK;
   }
 
@@ -431,8 +473,35 @@ class FileDropComTarget : public IDropTarget {
   virtual ~FileDropComTarget() = default;
 
  private:
+  bool HasSupportedDrag() const { return has_hdrop_ || has_unicode_text_; }
+
+  EncodableMap BuildHoverPayload(double x, double y) const {
+    EncodableList item_previews;
+    EncodableList string_previews;
+    if (has_hdrop_) {
+      item_previews.push_back(EncodableValue(EncodableMap{
+          {EncodableValue("isDirectory"), EncodableValue(false)},
+          {EncodableValue("isPromised"), EncodableValue(false)},
+      }));
+    } else if (has_unicode_text_) {
+      string_previews.push_back(EncodableValue(EncodableMap{
+          {EncodableValue("mimeType"), EncodableValue("text/plain")},
+      }));
+    }
+    return EncodableMap{
+        {EncodableValue("x"), EncodableValue(x)},
+        {EncodableValue("y"), EncodableValue(y)},
+        {EncodableValue("offer"),
+         EncodableValue(EncodableMap{
+             {EncodableValue("items"), EncodableValue(item_previews)},
+             {EncodableValue("strings"), EncodableValue(string_previews)},
+             {EncodableValue("isComplete"), EncodableValue(false)},
+         })},
+    };
+  }
+
   DWORD ChooseEffect(DWORD allowed) const {
-    if (!has_hdrop_) {
+    if (!HasSupportedDrag()) {
       return DROPEFFECT_NONE;
     }
     if ((allowed & DROPEFFECT_COPY) != 0U) {
@@ -463,6 +532,7 @@ class FileDropComTarget : public IDropTarget {
   bool registered_ = false;
   bool drag_helper_active_ = false;
   bool has_hdrop_ = false;
+  bool has_unicode_text_ = false;
 };
 
 class FileDropPlugin final : public flutter::Plugin {

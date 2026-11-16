@@ -972,13 +972,6 @@ public class FileDropPlugin: NSObject, FlutterPlugin, UIDropInteractionDelegate 
             if let mime = resolvedMime {
               map["mimeType"] = mime
             }
-            if let bookmark = try? copiedURL.bookmarkData(
-              options: .minimalBookmark,
-              includingResourceValuesForKeys: nil,
-              relativeTo: nil
-            ) {
-              map["appleBookmark"] = FlutterStandardTypedData(bytes: bookmark)
-            }
             storeEntry(map, at: index)
           }
         }

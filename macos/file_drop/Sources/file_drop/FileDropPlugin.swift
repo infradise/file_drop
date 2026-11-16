@@ -24,11 +24,68 @@ private final class SingleShotFlutterResult {
   }
 }
 
+/// Thread-safe registry retaining active security-scoped `URL` instances on macOS
+/// until `stopAccessingSecurityScopedResource` is invoked.
+private final class SecurityScopedRegistry {
+  private struct Entry {
+    let url: URL
+    var count: Int
+  }
+
+  private let lock = NSLock()
+  private var entries: [String: Entry] = [:]
+
+  @discardableResult
+  func startAccess(for url: URL) -> Bool {
+    let key = url.standardizedFileURL.path
+    lock.lock()
+    defer { lock.unlock() }
+    if var existing = entries[key] {
+      existing.count += 1
+      entries[key] = existing
+      return true
+    }
+    let granted = url.startAccessingSecurityScopedResource()
+    if granted {
+      entries[key] = Entry(url: url, count: 1)
+    }
+    return granted
+  }
+
+  func stopAccess(for url: URL) {
+    let key = url.standardizedFileURL.path
+    lock.lock()
+    defer { lock.unlock() }
+    guard var existing = entries[key] else {
+      url.stopAccessingSecurityScopedResource()
+      return
+    }
+    existing.count -= 1
+    if existing.count <= 0 {
+      entries.removeValue(forKey: key)
+      existing.url.stopAccessingSecurityScopedResource()
+    } else {
+      entries[key] = existing
+    }
+  }
+
+  func releaseAll() {
+    lock.lock()
+    let current = entries.values
+    entries.removeAll()
+    lock.unlock()
+    for entry in current {
+      entry.url.stopAccessingSecurityScopedResource()
+    }
+  }
+}
+
 /// Unified macOS native plugin for `file_drop` providing `NSOpenPanel` /
 /// `NSSavePanel` dialogs and `NSDraggingDestination` window drag-and-drop.
 public class FileDropPlugin: NSObject, FlutterPlugin {
   private weak var registrar: FlutterPluginRegistrar?
   private let channel: FlutterMethodChannel
+  private let securityRegistry = SecurityScopedRegistry()
   private weak var dropOverlayView: FileDropOverlayView?
   private var frameObserver: NSObjectProtocol?
 
@@ -48,6 +105,7 @@ public class FileDropPlugin: NSObject, FlutterPlugin {
     if let observer = frameObserver {
       NotificationCenter.default.removeObserver(observer)
     }
+    securityRegistry.releaseAll()
   }
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -352,9 +410,9 @@ public class FileDropPlugin: NSObject, FlutterPlugin {
     }
 
     if start {
-      result.send(url.startAccessingSecurityScopedResource())
+      result.send(securityRegistry.startAccess(for: url))
     } else {
-      url.stopAccessingSecurityScopedResource()
+      securityRegistry.stopAccess(for: url)
       result.send(true)
     }
   }
@@ -381,6 +439,8 @@ private final class FileDropOverlayView: NSView {
     }
     draggedTypes.append(.fileURL)
     draggedTypes.append(NSPasteboard.PasteboardType("NSFilenamesPboardType"))
+    draggedTypes.append(.URL)
+    draggedTypes.append(.string)
     registerForDraggedTypes(draggedTypes)
   }
 
@@ -408,13 +468,43 @@ private final class FileDropOverlayView: NSView {
     ]
   }
 
+  private func buildHoverPayload(for sender: NSDraggingInfo) -> [String: Any] {
+    let coords = flutterCoordinates(for: sender)
+    let pasteboard = sender.draggingPasteboard
+    let types = pasteboard.types ?? []
+    let hasFile = types.contains(.fileURL)
+      || types.contains(NSPasteboard.PasteboardType("NSFilenamesPboardType"))
+      || NSFilePromiseReceiver.readableDraggedTypes.contains(where: {
+        types.contains(NSPasteboard.PasteboardType($0))
+      })
+    var itemPreviews: [[String: Any]] = []
+    var stringPreviews: [[String: Any]] = []
+    if hasFile {
+      itemPreviews.append(["isDirectory": false, "isPromised": false])
+    } else if types.contains(.URL) {
+      stringPreviews.append(["mimeType": "text/uri-list"])
+    } else if types.contains(.string) {
+      stringPreviews.append(["mimeType": "text/plain"])
+    }
+    return [
+      "x": coords["x"] ?? 0.0,
+      "y": coords["y"] ?? 0.0,
+      "offer": [
+        "items": itemPreviews,
+        "strings": stringPreviews,
+        "isComplete": false,
+        "allowedOperations": ["copy"],
+      ],
+    ]
+  }
+
   override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-    channel.invokeMethod("onDragEntered", arguments: flutterCoordinates(for: sender))
+    channel.invokeMethod("onDragEntered", arguments: buildHoverPayload(for: sender))
     return .copy
   }
 
   override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-    channel.invokeMethod("onDragUpdated", arguments: flutterCoordinates(for: sender))
+    channel.invokeMethod("onDragUpdated", arguments: buildHoverPayload(for: sender))
     return .copy
   }
 
@@ -435,6 +525,7 @@ private final class FileDropOverlayView: NSView {
     let coords = flutterCoordinates(for: sender)
     var items: [[String: Any]] = []
     var seenPaths = Set<String>()
+    var rawTextCandidate: String?
     let dispatchGroup = DispatchGroup()
 
     func appendItem(url: URL, fromPromise: Bool) {
@@ -508,14 +599,47 @@ private final class FileDropOverlayView: NSView {
           }
         }
       }
+    } else {
+      let nonFileURLs = ((pasteboard.readObjects(
+        forClasses: [NSURL.self],
+        options: [.urlReadingFileURLsOnly: false]
+      ) as? [URL]) ?? []).filter { !$0.isFileURL }
+
+      if !nonFileURLs.isEmpty {
+        for url in nonFileURLs {
+          let value = url.absoluteString
+          if rawTextCandidate == nil {
+            rawTextCandidate = value
+          }
+          items.append([
+            "kind": "string",
+            "mimeType": "text/uri-list",
+            "value": value,
+          ])
+        }
+      } else if let text = pasteboard.string(forType: .string), !text.isEmpty {
+        rawTextCandidate = text
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isHttpOrMailto = trimmed.hasPrefix("http://")
+          || trimmed.hasPrefix("https://")
+          || trimmed.hasPrefix("mailto:")
+        items.append([
+          "kind": "string",
+          "mimeType": isHttpOrMailto ? "text/uri-list" : "text/plain",
+          "value": text,
+        ])
+      }
     }
 
     dispatchGroup.notify(queue: .main) {
-      let payload: [String: Any] = [
+      var payload: [String: Any] = [
         "x": coords["x"] ?? 0.0,
         "y": coords["y"] ?? 0.0,
         "items": items,
       ]
+      if let rawText = rawTextCandidate {
+        payload["rawText"] = rawText
+      }
       self.channel.invokeMethod("onDragDone", arguments: payload)
     }
 

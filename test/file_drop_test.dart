@@ -1,3 +1,6 @@
+@TestOn('vm')
+library;
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -2179,6 +2182,67 @@ void main() {
       expect(bookmarkStarted, isTrue);
       expect(bookmarkStopped, isTrue);
       expect(releasedSessions, <String>['ios-drop-session-99']);
+    });
+
+    test(
+        'Android SAF openRead uses O(N) stateful openContentStream / readContentStreamChunk / closeContentStream and chunked saveTo',
+        () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final fullPayload = Uint8List.fromList(
+          List<int>.generate(600 * 1024, (int i) => i % 251));
+      var openCount = 0;
+      var chunkCalls = 0;
+      var closeCount = 0;
+      var cursor = 0;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(DesktopDrop.channel,
+              (MethodCall call) async {
+        switch (call.method) {
+          case 'openContentStream':
+            openCount++;
+            final args = call.arguments as Map<Object?, Object?>;
+            cursor = (args['start'] as int?) ?? 0;
+            return 'stream-handle-1';
+          case 'readContentStreamChunk':
+            chunkCalls++;
+            final args = call.arguments as Map<Object?, Object?>;
+            final len = args['length'] as int;
+            if (cursor >= fullPayload.length) {
+              return Uint8List(0);
+            }
+            final end = (cursor + len).clamp(0, fullPayload.length);
+            final slice = fullPayload.sublist(cursor, end);
+            cursor = end;
+            return slice;
+          case 'closeContentStream':
+            closeCount++;
+            return null;
+          default:
+            return null;
+        }
+      });
+
+      final safItem = XFile.fromUri(
+        Uri.parse('content://com.example.provider/document/big.bin'),
+      );
+      final tempOut = await Directory.systemTemp.createTemp('saf_stream_');
+      try {
+        final destPath = '${tempOut.path}/saved_big.bin';
+        await safItem.saveTo(destPath);
+
+        expect(openCount, 1);
+        expect(chunkCalls, greaterThanOrEqualTo(3));
+        expect(closeCount, 1);
+        expect(await File(destPath).readAsBytes(), fullPayload);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(DesktopDrop.channel, null);
+        if (tempOut.existsSync()) {
+          await tempOut.delete(recursive: true);
+        }
+      }
     });
   });
 }

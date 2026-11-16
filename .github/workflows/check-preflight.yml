@@ -392,11 +392,11 @@ jobs:
             cat "${DRY_OUT}"
           fi
 
-          if grep -E '^├── (\.github|test|analysis_options\.yaml)\b' "${DRY_OUT}"; then
+          if grep -E '^[├└]── (\.github|test|docs|analysis_options\.yaml)\b' "${DRY_OUT}"; then
             echo "ERROR: Root dev/CI files leaked into published archive!"
             exit 1
           fi
-          if grep -E '^│   ├── (android|ios|linux|macos|web|windows|test|analysis_options\.yaml)\b' "${DRY_OUT}"; then
+          if grep -E '^[│ ]   [├└]── (android|ios|linux|macos|web|windows|test|analysis_options\.yaml)\b' "${DRY_OUT}"; then
             echo "ERROR: Example native runner scaffolding leaked into published archive!"
             exit 1
           fi

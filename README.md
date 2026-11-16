@@ -50,7 +50,7 @@ Adding both `file_selector` and `desktop_drop` to a Flutter project pulls in a c
 
 ```yaml
 dependencies:
-  file_drop: ^1.0.0
+  file_drop: ^1.0.1
 ```
 
 ## 1-Line Drop-in Migration
@@ -210,7 +210,7 @@ No extra `Info.plist` usage description keys or `AndroidManifest.xml` storage pe
 
 ## Acknowledgements & Attribution
 
-`file_drop` is an independent, zero-dependency implementation engineered by Infradise Inc. Its drop-in compatibility APIs are designed for seamless interoperability with:
+`file_drop` is an independent, zero-dependency implementation. Its drop-in compatibility APIs are designed for seamless interoperability with:
 
 - [`file_selector`](https://pub.dev/packages/file_selector) & [`cross_file`](https://pub.dev/packages/cross_file) by the Flutter Authors (BSD-3-Clause).
 - [`desktop_drop`](https://github.com/MixinNetwork/flutter-plugins/tree/main/packages/desktop_drop) by MixinNetwork.

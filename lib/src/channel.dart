@@ -14,6 +14,9 @@ abstract interface class DropTargetNode {
   /// Whether this target is currently mounted and enabled.
   bool get isEnabled;
 
+  /// Identifier of the Flutter view hosting this target, if available.
+  int? get viewId;
+
   /// Hit-test behavior controlling whether underlying targets also receive
   /// events.
   HitTestBehavior get hitTestBehavior;
@@ -576,7 +579,8 @@ class DesktopDrop {
     required List<DropItemPreview> previews,
     required bool isComplete,
   }) {
-    final candidates = <_TargetCandidate>[];
+    final activeTargets = <DropTargetNode>{};
+    final viewIds = <int>{};
     for (final target in List<DropTargetNode>.of(_targets)) {
       if (!target.isEnabled) {
         continue;
@@ -585,26 +589,53 @@ class DesktopDrop {
       if (box == null || !box.attached || !box.hasSize) {
         continue;
       }
-      final localPos = box.globalToLocal(globalPosition);
-      if (box.paintBounds.contains(localPos)) {
-        candidates.add(
-          _TargetCandidate(
-            target: target,
-            box: box,
-            localPosition: localPos,
-          ),
-        );
+      activeTargets.add(target);
+      if (target.viewId != null) {
+        viewIds.add(target.viewId!);
+      }
+    }
+
+    if (activeTargets.isEmpty) {
+      return const <_TargetHit>[];
+    }
+
+    if (viewIds.isEmpty) {
+      for (final renderView in RendererBinding.instance.renderViews) {
+        viewIds.add(renderView.flutterView.viewId);
+      }
+    }
+
+    final candidates = <_TargetCandidate>[];
+    final seenTargets = <DropTargetNode>{};
+    for (final viewId in viewIds) {
+      final hitResult = BoxHitTestResult();
+      RendererBinding.instance.hitTestInView(hitResult, globalPosition, viewId);
+      for (final entry in hitResult.path) {
+        if (entry is! BoxHitTestEntry) {
+          continue;
+        }
+        final renderTarget = entry.target;
+        if (renderTarget is! RenderMetaData) {
+          continue;
+        }
+        final meta = renderTarget.metaData;
+        if (meta is DropTargetNode &&
+            activeTargets.contains(meta) &&
+            seenTargets.add(meta)) {
+          candidates.add(
+            _TargetCandidate(
+              target: meta,
+              box: renderTarget,
+              localPosition: entry.localPosition,
+            ),
+          );
+        }
       }
     }
 
     if (candidates.isEmpty) {
       return const <_TargetHit>[];
     }
-
-    candidates.sort(
-      (_TargetCandidate a, _TargetCandidate b) =>
-          _compareRenderBoxesFrontToBack(a.box, b.box),
-    );
 
     final winners = <_TargetHit>[];
     for (final candidate in candidates) {
@@ -726,68 +757,6 @@ class DesktopDrop {
       return Offset.zero;
     }
     return box.globalToLocal(globalPosition);
-  }
-
-  static int _compareRenderBoxesFrontToBack(RenderBox a, RenderBox b) {
-    if (identical(a, b)) {
-      return 0;
-    }
-    final chainA = _buildAncestorChain(a);
-    final chainB = _buildAncestorChain(b);
-
-    // Deeper nested RenderBox is painted in front of its ancestor.
-    if (chainA.contains(b)) {
-      return -1;
-    }
-    if (chainB.contains(a)) {
-      return 1;
-    }
-
-    // Walk from the root down to the lowest common ancestor.
-    var idxA = chainA.length - 1;
-    var idxB = chainB.length - 1;
-    if (!identical(chainA[idxA], chainB[idxB])) {
-      return 0;
-    }
-    while (
-        idxA > 0 && idxB > 0 && identical(chainA[idxA - 1], chainB[idxB - 1])) {
-      idxA--;
-      idxB--;
-    }
-
-    final commonAncestor = chainA[idxA];
-    final branchA = chainA[idxA - 1];
-    final branchB = chainB[idxB - 1];
-
-    var order = 0;
-    var index = 0;
-    var orderA = -1;
-    var orderB = -1;
-    commonAncestor.visitChildren((RenderObject child) {
-      if (identical(child, branchA)) {
-        orderA = index;
-      } else if (identical(child, branchB)) {
-        orderB = index;
-      }
-      index++;
-    });
-
-    if (orderA != -1 && orderB != -1) {
-      // RenderObject.visitChildren visits in paint order (back-to-front).
-      // Higher index means painted later (closer to front).
-      order = orderB.compareTo(orderA);
-    }
-    return order;
-  }
-
-  static List<RenderObject> _buildAncestorChain(RenderObject leaf) {
-    final chain = <RenderObject>[leaf];
-    var current = leaf.parent;
-    while (current != null) {
-      chain.add(current);
-      current = current.parent;
-    }
-    return chain;
   }
 
   static Offset? _parseOffset(Object? raw) {

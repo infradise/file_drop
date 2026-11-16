@@ -108,8 +108,14 @@ class DropTarget extends StatefulWidget {
 }
 
 class _DropTargetState extends State<DropTarget> implements DropTargetNode {
+  bool _inheritedVisible = true;
+  int? _cachedViewId;
+
   @override
-  bool get isEnabled => mounted && widget.enable;
+  bool get isEnabled => mounted && widget.enable && _inheritedVisible;
+
+  @override
+  int? get viewId => _cachedViewId;
 
   @override
   HitTestBehavior get hitTestBehavior => widget.behavior;
@@ -133,6 +139,22 @@ class _DropTargetState extends State<DropTarget> implements DropTargetNode {
   void initState() {
     super.initState();
     DesktopDrop.instance.registerTarget(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final wasEnabled = isEnabled;
+    _inheritedVisible =
+        Visibility.of(context) && TickerMode.valuesOf(context).enabled;
+    _cachedViewId = View.maybeOf(context)?.viewId;
+    if (wasEnabled && !isEnabled) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !isEnabled) {
+          DesktopDrop.instance.notifyTargetDisabled(this);
+        }
+      });
+    }
   }
 
   @override
@@ -191,7 +213,7 @@ class _DropTargetState extends State<DropTarget> implements DropTargetNode {
   Widget build(BuildContext context) {
     return MetaData(
       metaData: this,
-      behavior: widget.behavior,
+      behavior: HitTestBehavior.translucent,
       child: widget.child,
     );
   }
