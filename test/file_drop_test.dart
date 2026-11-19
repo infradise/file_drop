@@ -109,14 +109,14 @@ void main() {
     test(
         'reads bytes, UTF-8/Latin1 strings, length, and lastModified from disk',
         () async {
-      final filePath = '${tempDir.path}/한글_샘플.txt';
-      const content = 'Hello file_drop! 안녕하세요 🚀\nLine 2';
+      final filePath = '${tempDir.path}/sample_utf8.txt';
+      const content = 'Hello file_drop! UTF-8 \u2022 \u{1F680}\nLine 2';
       final diskFile = File(filePath);
       await diskFile.writeAsString(content, encoding: utf8);
 
       final item = XFile(filePath, mimeType: 'text/plain');
       expect(item.path, filePath);
-      expect(item.name, '한글_샘플.txt');
+      expect(item.name, 'sample_utf8.txt');
       expect(item.mimeType, 'text/plain');
       expect(item.isDirectory, isFalse);
 
@@ -139,7 +139,7 @@ void main() {
       final item = FileDropItem(filePath);
       expect(
         await item.readAsString(encoding: latin1),
-        'Café résumé',
+        'Caf\u00e9 r\u00e9sum\u00e9',
       );
     });
 
